@@ -1,0 +1,191 @@
+---
+title: "An Improvement on End‑to‑End Chess Recognition with ChessReD"
+subtitle: "Utilizing ConvNext and Transformer Encoders to Improve Results"
+author: "Presented by CJ Jones"
+format:
+  revealjs:
+    theme: default
+    slide-number: true
+    toc: true
+    toc-depth: 2
+    incremental: false
+    footer: "DSAN 6500 End-to-End Chess Recognition Presentation"
+    logo: "logo.png"
+    css: styles.css
+    self-contained: true 
+    resources:
+      - Chess-Board-with-Boxes.png
+      - Version_6_Test_Set_Confusion_Matrix.png
+      - Version_6_Board_Error_Distribution.png
+      - Version_6_Near_Perfect_Predict.png
+      - Version_6_Perfect_Predict.png
+
+---
+<!-- subtitle: "Masouris, Athanasios, and Jan van Gemert. “End-to-End Chess Recognition.” In *Proceedings of the 19th International Joint Conference on Computer Vision, Imaging and Computer Graphics Theory and Applications*" -->
+## Why Chess Recognition?
+
+- Instant digitization of over‑the‑board games for analysis
+- Eliminates manual move entry and avoids error‑prone notation
+- Useful for training, broadcasting, and archival of chess games
+
+![Chess-Board-with-Boxes](Chess-Board-with-Boxes.png){ width=60% }
+
+::: {.notes}
+Open with a brief anecdote: everyone has taken a phone photo of a position and then had to re‑enter it manually. This paper tackles that annoyance head‑on.
+:::
+
+## Why End-to-End Models?
+
+- Traditional chess recognition pipelines involve multiple independent modules:
+  - Chessboard detection
+  - Square localization
+  - Piece classification
+- Each step introduces potential error that **accumulates downstream**
+- Most require **manual input**, such as selecting board corners
+- Heavily constrained datasets — typically synthetic, top-down, or uniform lighting
+- Paper baseline ([Masouris & van Gemert 2023]) reached 15 % perfect boards on the real‑photo ChessReD dataset
+
+> This motivates the search for a unified deep learning model that can **learn all components jointly** from raw image input.
+
+## A New Structure for End-to-End Chess Recognition
+
+- Backbone 
+  - ConvNeXt‑B‑ ImageNet1K pretrained
+  - Removes final conv & pooling → *feature maps*
+
+- Square Tokens (learnable, 64×d)
+  - Provide positional queries to the transformer
+
+- Transformer Encoder (4 layers, 8 heads)
+  - Processes [square tokens | flattened CNN patches]
+  - Global context helps disambiguate visually similar pieces
+  - Assists in orienting the board correctly
+
+- Classification Head
+  - Linear layer → 13‑way softmax per token
+  - Outputs  logits → argmax → FEN
+
+---
+
+## Training Regime Part 1
+
+| Component              | # Params           | Trainable @ Start? |
+| ---------------------- | ------------------ | ------------------ |
+| ConvNeXt-B backbone    | 88 M               | ❌ frozen           |
+| Transformer (4 layers) | 17 M               | ❌ frozen           |
+| Square tokens          | 64 × 1024 ≈ 66 k   | ✅                  |
+| Linear head            | 13 k               | ✅                  |
+| **Total**              | **105 M**          | 79 k (0.07 %)       |
+
+\
+
+| Epoch(s) | CNN Blocks Unfrozen | Transformer Layers Unfrozen | What’s Happening |
+|----------|--------------------|-----------------------------|------------------|
+| **0 – 1** | 0 / 12            | 0 / 4                       | Warm-up: only square tokens + linear head learn |
+| **2**     | 0 / 12            | **last 1 / 4**              | Begin adapting highest-level Transformer layer |
+| **3 – 14**| **last 2 / 12**   | **last 1 / 4**              | Fine-tune high-level ConvNeXt blocks in tandem with Transformer |
+
+
+## Training Regime Part 2
+
+- Optimizer: Adam + weight decay = 5 e‑5
+- LR Schedule: One‑Cycle LR (max 1e‑4) across 15 epochs
+- Precision: 16‑bit mixed → 1.4× faster & ≤70 % VRAM
+- Batch: 8 images on NVIDIA RTX 4070 (12 GB)
+- Callbacks: ModelCheckpoint on lowest val_loss
+- Training plots saved every epoch with TensorBoard
+- Data Augmentation:
+  ‑ Random brightness ±15 %, hue ±5 %, rotation ±5°
+  ‑ Random perspective warp (simulate skewed camera angles)
+
+## ChessRed Dataset
+
+- **10,800** smartphone photos from 3 devices (iPhone 12, Huawei P40 Pro, Galaxy S8)
+- Shots after every move in **100 real games** covering 100 ECO openings
+- Varied viewpoints: top, player, corner, side, low‑angle
+- Annotations:
+  - FEN strings for every image (64 labelled squares)
+  - For 2 k images: bounding boxes + labelled board corners
+
+- Image resize: 512×512 w/ bicubic
+- Train/Val/Test: 60 / 20 / 20 (game‑level split)
+
+#### Class Imbalance Snapshot
+
+| Piece | Instances (train) |
+|-------|------------------|
+| Pawn  | 70 k |
+| Queen | 4 k |
+
+::: {.notes}
+Highlight that real photos bring occlusions, lighting changes, shadows—things synthetic datasets miss.
+:::
+
+## Visualizing a Prediction
+
+![Near Perfect Test Prediction](Version_6_Near_Perfect_Predict.png){ width=75% }  
+![Perfect Test](Version_6_Perfect_Predict.png){ width=75% }
+
+## Results
+
+| Metric                         | Baseline ResNeXt (2023) | **ConvNeXt-T (+Tx)** (Ours) |
+| ------------------------------ | ----------------------- | --------------------------- |
+| Mean incorrect squares / board | **3.40**                    | **4.33**              |
+| Boards with no mistakes (%)    | **15.26 **                  | **9.12**              |
+| Boards with ≤ 1 mistake (%)    | **25.92**                   | **19.38**              |
+| Per-square error rate (%)      | **5.31**                    | **5.94**              |
+
+::: {.columns}
+::: {.column width="50%"}
+![Test Set Confusion Matrix](Version_6_Test_Set_Confusion_Matrix.png){ width=100% }
+:::
+::: {.column width="50%"}
+![Board Error Distribution](Version_6_Board_Error_Distribution.png){ width=100% }
+:::
+:::
+
+## Interpretation & Insights
+
+1. Annotation‑free training. The model learns board geometry from scratch—no corner clicks, homography, or bounding‑box labels are required. Every image only needs its FEN string.
+
+2. Entire ChessReD leveraged (10 800 photos). By discarding the bounding‑box requirement we expand training data 5× compared with prior work that used only the 2 k labelled subset, capturing far more variation in angle, lighting, and occlusion.
+
+3. Self‑attention acts as an implicit board detector. Square‑token attention heads automatically focus on rank/file edges and coordinate markings, letting the network infer orientation and resolve piece‑type ambiguities
+
+4. Gradual unfreezing preserves ImageNet priors. Keeping ConvNeXt frozen for three epochs prevents catastrophic forgetting, then fine‑tunes just the top two blocks alongside the transformer for domain specificity without over‑fitting.
+
+5. For Streamlit Application, its is very important to load data into prediction scheme in the exact way as training
+
+::: {.notes}
+Stress that “perfect board” is an *all‑or‑nothing* metric: even one mislabeled pawn ruins it.  
+Highlight that 15 % perfect may sound low, but compared with 2 % it is a huge leap — and the per‑square error drops from ~74 % to ~5 %.
+:::
+
+
+## Contributions, Limitations, & Future Work 
+
+- **Contributions**
+  - Get full use of first public dataset of real chess photos (ChessReD)
+  - End‑to‑end CNN that outperforms pipeline-based SOTA on real data
+
+- **Limitations**
+  - Only one physical chess set used; generalization across styles untested
+  - Classification model can't output unseen piece/square labels
+
+- **Future Work**
+  - Develop full Streamlit (or equivalent app)
+  - Construct Additional Datasets for further training
+
+::: {.notes}
+Close by inviting collaboration: dataset and code are on GitHub.
+:::
+
+# Take‑Home Message
+
+> Real‑world chess recognition is hard, but moving from brittle pipelines to end‑to‑end learning, backed by the new ChessReD dataset, is the way forward.
+
+- **Discussion Questions Welcome**
+
+::: {.notes}
+Thank the audience and open for questions.
+:::

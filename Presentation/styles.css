@@ -1,0 +1,21 @@
+/* Global base font size */
+.reveal {
+    font-size: 1.5em; /* This affects body text. Start here. */
+  }
+  
+/* Headings scaled up significantly */
+.reveal h1 {
+font-size: 3em;
+}
+
+.reveal h2 {
+font-size: 2.5em;
+}
+
+.reveal h3 {
+font-size: 2.5em;
+}
+
+.reveal .title-slide h2.subtitle {
+font-size: 2.5em;
+}
