@@ -1,3 +1,5 @@
 extracted_data
 raw_data
 lightning_logs
+.env
+checkpoints
