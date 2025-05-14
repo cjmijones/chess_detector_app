@@ -3,3 +3,4 @@ raw_data
 lightning_logs
 .env
 checkpoints
+.venv
