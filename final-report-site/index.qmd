@@ -1,0 +1,262 @@
+---
+title: "An Improvement on End‑to‑End Chess Recognition with ChessReD"
+subtitle: "Utilizing ConvNext and Transformer Encoders to Improve Results"
+authors:
+  - name: CJ Jones
+    email: cmj147@georgetown.edu
+    affiliation: Georgetown University
+format:
+  html: 
+    embed-resources: True
+    theme: mint
+    grid:
+      sidebar-width: 0px
+      body-width: 1200px
+      margin-width: 200px
+      gutter-width: 2rem
+    code-fold: true
+    code-tools: true
+    code-summary: "Show Code"
+    smooth-scroll: true
+    toc: true
+    css: styles.css
+    toc-depth: 4
+    number-sections: true
+execute:
+  freeze: auto
+  echo: false
+  message: false
+  warning: false
+---
+
+## Abstract
+
+This project investigates whether recent advances in deep learning architectures can be applied to the automated recognition of chessboard positions from images. Specifically, it implements a hybrid model composed of a convolutional neural network backbone and a transformer-based encoder to classify piece identities and positions in overhead chessboard photographs. The full ChessReD dataset—comprising 10,800 labeled board images from a real-world chess set is leveraged without requiring bounding box annotations, allowing a holistic image-to-label pipeline. The model is trained using supervised learning, and its accuracy is evaluated in terms of per-square and full-board prediction performance. Results show promising accuracy, particularly in distinguishing piece types and colors across varied lighting, angle, and board conditions. These findings demonstrate that transformer-augmented convolutional models can achieve high levels of precision in structured visual domains and provide a strong baseline for future work in end-to-end chess state recognition.
+
+## Introduction
+
+Chessboard state recognition presents a unique challenge within the broader field of computer vision. Unlike general object detection, this task demands not only the localization of individual objects (pieces) but also their semantic interpretation (piece identity and color) and spatial arrangement on a grid. The ability to automate this process has practical applications in education, broadcasting, game analysis, and real-time human-computer interaction. While prior work has largely focused on bounding box detection and piece classification in isolation, the prospect of a single unified model that ingests raw images and outputs a complete board matrix remains relatively unexplored.
+
+This project seeks to implement such an end-to-end pipeline, leveraging the consistent spatial structure of a chessboard and the recent success of vision transformers in structured visual tasks. Drawing inspiration from advances in document layout understanding and tokenized image interpretation, the model architecture combines a convolutional feature extractor with a transformer encoder to reason about inter-square relationships. The aim is to evaluate whether such a hybrid architecture can effectively learn piece placements directly from image data without the need for pre-annotated regions or handcrafted features.
+
+## Literature Review
+
+The architecture and training procedure adopted for this project is primarily informed by the work of Masouris and van Gemert (2023), *End-to-End Chess Recognition*, which was among the first to propose a unified model for predicting the full chessboard state from a single photo. Their approach integrated a convolutional backbone with a custom classification head designed to output 64 predictions corresponding to the 64 board squares. A major finding of their paper was the necessity of using bounding boxes for detecting chess boards under variable lighting, tilt, and occlusion conditions. Notably, the authors also reported limited success when applying vision transformers directly, citing convergence challenges and instability in early training. These limitations motivated the current project’s design, which introduces a stabilized transformer encoder stage while retaining convolutional priors to handle local pattern extraction. By addressing the optimization and scale challenges identified in Masouris and van Gemert, this study builds directly on their contributions and attempts to further the feasibility of real-time end-to-end chess recognition.
+
+## Dataset
+
+All experiments in this project are conducted using the full ChessReD dataset—a large-scale corpus of 10,800 high-resolution chessboard photographs captured across 100 real games. The games were played under diverse real-world conditions and photographed from multiple angles using three smartphone models (iPhone 12, Huawei P40 Pro, Galaxy S8). For each move in the game, a new image was taken, covering a wide variety of 100 ECO openings. Viewpoints include top-down, player-facing, corner, side, and low-angle shots, simulating realistic and potentially obstructed conditions.
+
+Each image is labeled with a full-board FEN string, providing a 64-element label matrix that specifies the piece identity and color for each square. In contrast to earlier work that required labor-intensive bounding box annotations, this project leverages the entire dataset—including those 8,722 images without any bounding boxes—by adopting an end-to-end classification strategy that requires only the board-level matrix as supervision. A subset of 2,078 images does include bounding boxes and corner coordinates, but those additional labels were not used during training or evaluation in this pipeline.
+
+A custom ChessRecognitionDataset class, derived from the PyTorch Dataset class, was built to handle image preprocessing and prepare the inputs for use in DataLoaders. All images were resized to 512×512 pixels and normalized during the data ingestion process. The dataset is split using a 60/20/20 ratio across training, validation, and test sets using a game-level split, ensuring no boards from the same game appear in multiple partitions. This setup preserves variation in board states and camera viewpoints across splits and enables meaningful performance tracking across unseen games.
+
+By eliminating the need for bounding boxes, this project is able to utilize the entire dataset, an improvement on the prior ResNet model architecture work which relied on bounding box supervision and thus used only ~2,078 images. This broader data exposure enables better representation learning and allows the model to generalize across a wider range of lighting, angles, and board configurations. A final benefit of this model feature is that future datasets can be more readily generated using simple images captured by mobile devices without the need for additional preprocessing such as bounding box illustration.
+
+::: {.columns}
+::: {.column width="50%"}
+<figure>
+  <img src="../Presentation/Chess-Board-with-Boxes.png" width="80%" class="shadow padded">
+  <figcaption>Fig. 1: Annotated chess board output from ChessReD Dataset</figcaption>
+</figure>
+
+:::
+
+::: {.column width="50%"}
+<figure>
+  <img src="../Presentation/Chess-Board-without-Boxes.jpg" width="80%" class="shadow padded">
+  <figcaption>Fig. 2: Chess board with no bounding boxes output from ChessReD Dataset</figcaption>
+</figure>
+
+:::
+:::
+
+## Methods
+
+The model developed for this project follows a modular deep learning architecture that transforms a single chessboard image into a structured board matrix of piece labels. Its design reflects the intuition that successful chess recognition depends not only on identifying individual pieces in isolation, but also on understanding their relationships within a spatially constrained and semantically rich environment. To that end, the model blends a convolutional neural network for spatially localized feature extraction, a transformer encoder for contextual reasoning, and a classification head to produce square-level predictions. Each component is staged and fine-tuned over the course of training using a carefully managed freezing and unfreezing strategy that encourages stable convergence and effective parameter reuse.
+
+### Convolutional Feature Extractor
+
+At the core of the model lies a ConvNeXt-Base backbone, pretrained on ImageNet and repurposed here to serve as a domain-agnostic visual encoder. ConvNeXt’s architectural innovations—such as depthwise convolutions and inverted bottlenecks—make it particularly well-suited for extracting mid- and high-level spatial features from grid-like images, such as chessboards. Its use in this setting is motivated by the desire to efficiently summarize piece shape, board texture, and lighting variations without requiring handcrafted features or preprocessing.
+
+When a $512 \times 512$ RGB image enters the model, the ConvNeXt backbone produces a feature map of shape $(B, 1024, 8, 8)$, where $B$ denotes batch size and $1024$ is the channel depth of the final layer. This output is flattened across the spatial dimensions and permuted to form a sequence of 64 vectorized square embeddings, each of size 1024. Notably, this transformation preserves the 8×8 topology of the input, enabling the next stage of the model to reason about squares in their natural order.
+
+To avoid destabilizing the pretrained weights during early training, all convolutional layers are initially frozen. Only the classification head and a set of learned positional query tokens remain active. Starting at epoch 3, the model gradually unfreezes the last three ConvNeXt blocks, allowing them to adapt to chess-specific visual cues. This approach balances stability and flexibility: the model retains the general visual representations learned on ImageNet, while still allowing task-relevant refinement as training progresses.
+
+This encoder alone contains over 88 million parameters, though less than a third are trainable until later in the learning process. The frozen layers act as a high-fidelity visual scaffold upon which task-specific logic is constructed in subsequent stages.
+
+<figure style="text-align: center;">
+  <img src="../Presentation/Model_Achitecture_Image.png"
+       width="60%"
+       style="padding: 12px; background-color: white; box-shadow: 0px 6px 12px rgba(0, 0, 0, 0.25); border-radius: 6px;">
+  <figcaption>Fig. 3: End-to-end architecture for combined chessboard recognition network</figcaption>
+</figure>
+
+### Transformer Encoder
+
+While convolutional backbones excel at capturing local texture and shape, they are fundamentally limited in modeling long-range spatial dependencies. Chess, by contrast, is a domain where relationships between distant squares—such as bishops pinning across diagonals or rooks pressuring open files—are essential to interpreting the board state. This domain-relationship knowledge is especially important when attempting to translate images into board position as the orientation of the board is of critical importance. In chess, each player starts on a predetermined side of the board and the relationship between a pieces color and its position on the board is important to both gameplay and predicting where pieces are placed. In many cases, the orientation of the board is best determined by information not encoded a piece's position, such as, as the number annotations on the side of the board. These board annotations exist outside the scope of the objects being detected and as a result convolutional backbones often are unable to incorporate this information while making predictions. To address this, the flattened CNN outputs are passed to a four-layer transformer encoder, which uses multi-head self-attention to model all-pairs interactions between the 64 board tokens.
+
+Each square is associated with a unique learned query token—a vector of size $1024$—which is prepended to the visual tokens prior to encoding. The final input to the transformer is thus a 128-token sequence: 64 query tokens and 64 vision-derived tokens. These are passed through successive attention layers that allow the model to reason about both individual square content and board-wide context simultaneously.
+
+Initially, the entire transformer is kept frozen, and only the classification head learns during the early epochs. Beginning in epoch 2, the final transformer layer (layer 4 of 4) is unfrozen. This enables attention weights to begin adapting based on observed positional structure—especially common spatial motifs such as castling formations, pawn chains, and center control. This deliberate timing mimics strategies used in large-language model fine-tuning, where delayed unfreezing has been shown to improve convergence and prevent catastrophic forgetting.
+
+Fully unfrozen, the transformer contributes roughly 25 million trainable parameters, most of which become active in the latter half of training. These attention weights play a crucial role in disambiguating visually similar pieces (such as bishops and pawns) based not just on appearance but also on context—e.g., the presence of a diagonal or the location of opposing threats.
+
+### Classification Head
+
+At the final stage of the pipeline, the output of the transformer encoder is sliced to retain only the 64 query embeddings, each now containing a context-aware summary of the square it represents. These vectors, each of dimension 1024, are passed through a fully connected linear head that maps them to one of 13 discrete classes. These include all six white and six black pieces, along with a “blank square” class used to denote empty tiles.
+
+The model thus produces a tensor of shape $(B, 64, 13)$ for a batch of size $B$, where each row in the final dimension represents the predicted probability distribution for a square’s content. During training, these predictions are reshaped to $(B \cdot 64, 13)$ and compared to the corresponding labels using a standard cross-entropy loss. This loss is averaged over all squares and all samples in the batch.
+
+Because the classification head remains trainable throughout all epochs, it plays a dual role: first, as a lightweight probe of the network’s early representational quality, and later, as a fine-grained decoder of the learned semantic relationships embedded in the transformer outputs. The head contains fewer than 1 million parameters but is central to the model’s predictive accuracy.
+
+### Training Procedure
+
+The full pipeline is trained for 15 epochs using the AdamW optimizer with an initial learning rate of $1 \times 10^{-4}$ and a weight decay of $5 \times 10^{-5}$. A OneCycleLR scheduler modulates the learning rate over time, gradually increasing it in the early epochs before pointing it downward to encourage convergence. Training is conducted with a batch size of 12 and leverages automatic mixed precision to reduce memory consumption and accelerate training on GPU hardware.
+
+A staged unfreezing strategy governs the flow of gradients throughout training. For the first epoch, only the classification head and square query tokens receive updates. In epoch 2, the last transformer layer is unfrozen, allowing attention weights to adapt. In epoch 3, the final three convolutional blocks are also unfrozen, enabling the vision backbone to begin adapting to the domain. This progression mirrors best practices in transfer learning, where gradual fine-tuning often results in better generalization and faster convergence.
+
+Additional unfreezing, to increase the ability of the model on the domain specific task, was attempted with promising early results. Unfortunately, computational limits prevented more flexible models from training in this project's timeframe, however, future could expand on this process to further improve Chess board recognition results. 
+
+During early training, approximately 7–10 million parameters are active. Once all stages are unfrozen, that number rises to nearly 30 million, though some of the deepest backbone layers remain frozen throughout. The total parameter count of the model is approximately 105 million.
+
+\
+
+:::: {}
+
+| Component              | # Params           | Trainable @ Start? | Trainable @ End |
+|------------------------|--------------------|---------------------|-----------------|
+| ConvNeXt-B backbone    | 88 M               | ❌ frozen           | ✅ last 3 / 12   |
+| Transformer (4 layers) | 17 M               | ❌ frozen           | ✅ last 1 / 4    |
+| Square tokens          | 64 × 1024 ≈ 66 k   | ✅                  | ✅              |
+| Linear head            | 13 k               | ✅                  | ✅              |
+| **Total**              | **105 M**          | 79 k (0.07%)        | ~30 M (28.6%)   |
+
+Fig 4. Summary of model parameter counts, training visibility at start and end of training, and staged unfreezing schedule.
+
+::::
+
+\
+
+Throughout training, the model logs both board-level accuracy (whether the entire predicted board matches the ground truth) and square-level accuracy (the mean accuracy across all 64 squares). These metrics are written to a `.csv` file and plotted after each epoch, alongside loss curves, to track training progress. 
+
+The effect of this design—particularly the staged unfreezing and dual-query transformer input—is a model that learns to recognize not only what a square contains, but also why that square’s role on the board might matter in the broader picture and how it helps to orient the board. Over time, the model transitions from pattern matching to structure inference, and it is this transition that the author believes underpins the models success in chess recognition.
+
+## Results
+
+ The end-to-end model was evaluated on a held-out test set following a game-level partitioning scheme. Overall, the model performed very well in both per-square and per-board accuracy metrics and produced smooth validation loss curves. Unlike the baseline presented in the original ChessReD paper, which was trained and tested on a 2,078-image subset constrained by the availability of bounding box annotations, the model described here was trained on the full 10,800 image corpus. Total training time required about 8 hours of training on a CUDA enabled GPU and produced 
+
+It should be noted, all evaluation metrics in this section reflect performance under matched conditions, with the validation and test sets composed of similarly styled, fully labeled chessboards. While this provides a strong signal of how the model performs under well-aligned test conditions, it does not necessarily reflect performance in completely out-of-distribution scenarios, such as tournament photography, chess stream screenshots, or stylized synthetic boards. As such, the reported metrics serve as an upper bound on generalization performance.
+
+The analysis below further details the models performance on test set predictions and focuses on four complementary aspects of model behavior: (1) error rates across entire boards, (2) square-level confusion trends, (3) qualitative prediction examples, and (4) loss convergence dynamics. Together, these provide a comprehensive picture of how well the model performs and where its weaknesses lie.
+
+
+### Error Distribution and Exact-Match Accuracy
+
+The clearest summary of model performance can be found by examining board-level accuracy: the number of boards where all 64 squares are predicted correctly. On this metric, exact match accuracy was **9.1%**, with **19.4%** of boards containing one or fewer mistakes. These figures fall below those of the ResNeXt+head baseline reported in the original ChessReD paper (15.3% exact, 25.9% ≤1 error), as shown in Figure 4. Despite this gap, these results show that a relatively shallow version of the ConvNeXt-TE model can nearly match the results of the ResNeXt architecture while training on less information per image. These top line figures suggest that unfreezing additional layers of the CNN feature extraction and the Transformer Encoder or assembling a larger more diverse dataset could allow the model greater flexibility and insight to produce results that match or exceed the Baseline ResNeXt model.
+
+Figure 4. Comparison of board-level and square-level metrics between the 2023 ResNeXt baseline and the proposed ConvNeXt+Transformer model. Baseline metrics were computed on a smaller training set with bounding box supervision; the right hand side model uses the full 10k ChessReD boards.
+
+:::: {}
+| Metric                         | Baseline ResNeXt (2023) | **ConvNeXt-TE (+Tx)** (Ours) |
+|-------------------------------|--------------------------|------------------------------|
+| Mean incorrect squares / board| **3.40**                 | **4.33**                     |
+| Boards with no mistakes (%)   | **15.26**                | **9.12**                     |
+| Boards with ≤1 mistake (%)    | **25.92**                | **19.38**                    |
+| Per-square error rate (%)     | **5.31**                 | **5.94**                     |
+
+::::
+
+\
+
+Figure 5 provides a visual breakdown of the distribution statistics for the per board accuracy of the model. While perfect board matches are relatively rare, the histogram reveals a strong leftward skew: most predictions are only a few squares off, with over 60% of boards having five or fewer mistakes.
+
+<figure style="text-align: center;">
+  <img src="../Presentation/Version_6_Board_Error_Distribution.png"
+       width="60%"
+       style="padding: 12px; background-color: white; box-shadow: 0px 6px 12px rgba(0, 0, 0, 0.25); border-radius: 6px;">
+  <figcaption>Fig. 5: Distribution of incorrect squares per predicted board. The model most frequently makes 2–4 errors per board, though outlier examples with 10+ mistakes persist.</figcaption>
+</figure>
+
+### 6.2 Piece-Level Confusions
+
+To gain finer insight into which square-level mistakes the model makes, a confusion matrix was computed over all 13 class labels—corresponding to the six standard white pieces, their six black counterparts, and an empty square. Each board square is assigned exactly one of these labels during both training and evaluation. The model’s predictions are then compared against ground truth labels at every position, and aggregated across all squares to produce a global confusion matrix, shown in Figure 6.
+
+To aid interpretation, the table below maps the class index used internally to the human-readable piece identity:
+
+:::: {.center .table}
+| Index | Label        | Description            |
+|-------|--------------|------------------------|
+| 0     | wP           | White Pawn             |
+| 1     | wN           | White Knight           |
+| 2     | wB           | White Bishop           |
+| 3     | wR           | White Rook             |
+| 4     | wQ           | White Queen            |
+| 5     | wK           | White King             |
+| 6     | bP           | Black Pawn             |
+| 7     | bN           | Black Knight           |
+| 8     | bB           | Black Bishop           |
+| 9     | bR           | Black Rook             |
+| 10    | bQ           | Black Queen            |
+| 11    | bK           | Black King             |
+| 12    | empty        | Empty square (no piece) |
+::::
+
+<figure style="text-align: center;">
+  <img src="../Presentation/Version_6_Test_Set_Confusion_Matrix.png"
+       width="60%"
+       style="padding: 12px; background-color: white; box-shadow: 0px 6px 12px rgba(0, 0, 0, 0.25); border-radius: 6px;">
+  <figcaption>Fig. 6: Confusion matrix on the held out test set for per-square predictions across 13 classes. Most errors are off-diagonal confusions between visually similar pieces, such as bishops/pawns or queens/rooks, particularly under black/white variants.</figcaption>
+</figure>
+
+Overall, the model is quite accurate in predicting individual classes and displays a notable diagonal structure. Interestingly, the model seems very able to distinguish between different color pieces which creates two smaller confusion matrices of interest in the upper-left and lower-right quadrants. In those quadrants, the incorrect class predictions that do exist appear relatively evenly distributed among the various classes which suggests that the errors are more related to environmental or setup issues like occlusion or poor lighting. Understandably, the most frequent error mode involves misclassifying occupied squares as empty (label 12).
+
+Nevertheless, diagonal structure is preserved—indicating that when the model errs, it often does so between semantically adjacent classes, and there are relatively few extreme misclassifications.
+
+### 6.3 Qualitative Board-Level Predictions
+
+To contextualize these aggregate metrics, Figure 7 presents a side-by-side prediction example. On the left is the original input image, while the middle and right grids show the ground truth and model output, respectively. The predicted matrix is visually close to the correct configuration, with all pieces in the correct region and most class labels correct. Minor errors (e.g., color mismatches) are visible but do not disrupt the board’s overall structure.
+
+<figure style="text-align: center;">
+  <img src="../Presentation/Version_6_Near_Perfect_Predict.png"
+       width="95%"
+       style="padding: 12px; background-color: white; box-shadow: 0px 6px 12px rgba(0, 0, 0, 0.25); border-radius: 6px;">
+  <figcaption>Fig. 7: Example of model prediction on a validation board. From left to right: original image, ground-truth board matrix, model-predicted matrix. The predicted board achieves a per-square accuracy of 0.984.</figcaption>
+</figure>
+
+This type of visualization confirms that while exact board match rates remain low, many predictions are near-perfect and fail only on minor semantic distinctions—particularly piece color or shape ambiguity under suboptimal lighting.
+
+### 6.4 Training Dynamics
+
+Figure 8 tracks the training and validation loss curves over the course of 15 epochs in which each image in the training corpus is used once. Due to the batch loading with size 12 and the DataLoader based training scheme, each epoch is composed of steps where a subset of images are used to train the parameters. The model converges smoothly, with validation loss stabilizing after ~8,000 steps. There is no evidence of significant overfitting, despite the model's size and flexibility. The benefit of the staged unfreezing strategy is visible here: loss drops sharply once transformer and CNN layers are gradually brought into play. This further suggests that unfreezing additional layers of the model and adding dropout blocks to prevent rapid-convergence could help to further decrease the validation loss. The smooth plateau of the training near zero does also suggest that limited data may be a bottleneck and that a more generalizable model would require a more diverse dataset.
+
+<figure style="text-align: center;">
+  <img src="../Presentation/loss_plot.png"
+       width="70%"
+       style="padding: 12px; background-color: white; box-shadow: 0px 6px 12px rgba(0, 0, 0, 0.25); border-radius: 6px;">
+  <figcaption>Fig. 8: Training and validation loss curves across all epochs. Smooth convergence reflects the stability of the training setup and the effectiveness of progressive unfreezing.</figcaption>
+</figure>
+
+---
+
+In sum, while the model falls short of the published baseline in exact board accuracy, it makes up for this by scaling to the full ChessReD corpus without requiring bounding box supervision. The combination of ConvNeXt and transformer layers proves capable of extracting both spatial and relational features from complex chessboard imagery and offers a concrete path for improvement, though further work is needed to close the gap in fine-grained piece identification.
+
+## Discussion
+
+The results of this project underscore both the promise and remaining challenges of full-board chess recognition using a complete end-to-end deep learning pipeline. The proposed ConvNeXt-Transformer model demonstrates the ability to parse dense spatial layouts and produce structured board predictions with strong per-square accuracy, even when trained without bounding box supervision.
+
+Compared to the original ChessReD baseline, which relied on a ResNeXt+head architecture trained on just 2,078 manually annotated images, the current model is trained on the full corpus of 10,800 examples, significantly broadening its exposure to diverse conditions. Without the inductive bias of spatial annotations, the model is forced to learn square alignment, orientation, and piece localization entirely from the image-grid association.
+
+Despite scoring lower than the baseline on board-level exact accuracy (9.1% vs. 15.3%) and per-square error (5.94% vs. 5.31%), the model's performance is nonetheless encouraging given its architectural constraints and more minimal supervision. These figures place it within striking distance of the benchmark results, even though the baseline relied on spatial annotations and a more localized model design. The histogram of board errors and per-square confusion matrix suggest that most misclassifications are minor—off by one class or one square—and do not represent systemic failures of the pipeline.
+
+However, several limitations remain. Most notably, the validation and test data are drawn from the same distribution as the training set—namely, mobile phone photos of physical boards captured in controlled conditions. While the dataset is reasonably diverse in terms of angle, lighting, and device, the model has not yet been tested on truly out-of-distribution data such as human played games, tournament footage, or stylized board designs. Early experiments suggest that performance may degrade in such settings, particularly in cases where occlusion, blur, or nonstandard camera angles break the visual priors learned during training.
+
+There also exist potential gains in this architecture from increased training capacity. For example, unfreezing additional CNN blocks and transformer layers may allow for more expressive feature refinement. Another avenue for future improvement involves scaling the dataset with synthetic augmentations or curated edge cases could help improve generalization across less typical board states. Finally, adding non-deep learning controls to the model output, such as manually preventing the model from picking more than a given number of a certain class in the final soft-max function, could provide easy accuracy gains without complex architectural adjustments.
+
+In conclusion, this project demonstrates that transformer-augmented convolutional architectures can learn to recognize complex board states without handcrafted spatial supervision. While there remains a gap to close in exact-match accuracy, the scalability, simplicity, and modularity of the current approach suggest a strong foundation for continued development. The transition from pattern recognition to structure understanding is well underway and future iterations of this model, equipped with deeper training and more varied data, are well-positioned to advance the state of the art in chess recognition.
+
+## References
+
+Masouris, Athanasios, and Jan C. van Gemert. End-to-End Chess Recognition. Delft: Delft University of Technology, 2023. https://github.com/ThanosM97/end-to-end-chess-recognition.
+
+
